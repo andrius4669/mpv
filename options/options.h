@@ -62,6 +62,7 @@ typedef struct mp_vo_opts {
     double override_display_fps;
     double timing_offset;
     int video_sync;
+    int repeat; // number of paints that should be done per frame
 
     // vo_drm
     struct drm_opts *drm_opts;

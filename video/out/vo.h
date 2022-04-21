@@ -222,6 +222,7 @@ struct vo_frame {
     // A repeat frame can be redrawn, in which case repeat==redraw==true, and
     // OSD should be updated.
     bool redraw, repeat;
+    int num_repeats;
     // The frame is not in movement - e.g. redrawing while paused.
     bool still;
     // Frames are output as fast as possible, with implied vsync blocking.

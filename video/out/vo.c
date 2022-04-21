@@ -702,6 +702,7 @@ static void forget_frames(struct vo *vo)
     if (in->current_frame) {
         in->current_frame->num_vsyncs = 0; // but reset future repeats
         in->current_frame->display_synced = false; // mark discontinuity
+        in->current_frame->num_repeats = vo->opts->repeat;
     }
 }
 
@@ -806,7 +807,9 @@ bool vo_is_ready_for_frame(struct vo *vo, int64_t next_pts)
     bool blocked = vo->driver->initially_blocked &&
                    !(in->internal_events & VO_EVENT_INITIAL_UNBLOCK);
     bool r = vo->config_ok && !in->frame_queued && !blocked &&
-             (!in->current_frame || in->current_frame->num_vsyncs < 1);
+             (!in->current_frame ||
+                (in->current_frame->display_synced && in->current_frame->num_vsyncs < 1) ||
+                (!in->current_frame->display_synced && in->current_frame->num_repeats >= vo->opts->repeat));
     if (r && next_pts >= 0) {
         // Don't show the frame too early - it would basically freeze the
         // display by disallowing OSD redrawing or VO interaction.
@@ -836,9 +839,12 @@ void vo_queue_frame(struct vo *vo, struct vo_frame *frame)
     struct vo_internal *in = vo->in;
     pthread_mutex_lock(&in->lock);
     assert(vo->config_ok && !in->frame_queued &&
-           (!in->current_frame || in->current_frame->num_vsyncs < 1));
+           (!in->current_frame ||
+                (in->current_frame->display_synced && in->current_frame->num_vsyncs < 1) ||
+                (!in->current_frame->display_synced && in->current_frame->num_repeats >= vo->opts->repeat)));
     in->hasframe = true;
     frame->frame_id = ++(in->current_frame_id);
+    frame->num_repeats = 0;
     in->frame_queued = frame;
     in->wakeup_pts = frame->display_synced
                    ? 0 : frame->pts + MPMAX(frame->duration, 0);
@@ -889,7 +895,7 @@ static bool render_frame(struct vo *vo)
         in->frame_queued = NULL;
     } else if (in->paused || !in->current_frame || !in->hasframe ||
                (in->current_frame->display_synced && in->current_frame->num_vsyncs < 1) ||
-               !in->current_frame->display_synced)
+               (!in->current_frame->display_synced && in->current_frame->num_repeats >= vo->opts->repeat))
     {
         goto done;
     }
@@ -908,7 +914,9 @@ static bool render_frame(struct vo *vo)
     int64_t end_time = pts + duration;
 
     // Time at which we should flip_page on the VO.
-    int64_t target = frame->display_synced ? 0 : pts - in->flip_queue_offset;
+    int64_t target = frame->display_synced ? 0 : pts - in->flip_queue_offset + (duration * MPMIN(in->current_frame->num_repeats, vo->opts->repeat - 1) / vo->opts->repeat);
+
+    in->current_frame->num_repeats++;
 
     // "normal" strict drop threshold.
     in->dropped_frame = duration >= 0 && end_time < now;
@@ -949,7 +957,8 @@ static bool render_frame(struct vo *vo)
         // Can the core queue new video now? Non-display-sync uses a separate
         // timer instead, but possibly benefits from preparing a frame early.
         bool can_queue = !in->frame_queued &&
-            (in->current_frame->num_vsyncs < 1 || !use_vsync);
+            ((in->current_frame->num_vsyncs < 1 && in->current_frame->display_synced) ||
+            (in->current_frame->num_repeats >= vo->opts->repeat && !use_vsync));
         pthread_mutex_unlock(&in->lock);
 
         if (can_queue)
@@ -1007,6 +1016,9 @@ static bool render_frame(struct vo *vo)
         more_frames = true;
 
     if (in->frame_queued && in->frame_queued->display_synced)
+        more_frames = true;
+    
+    if (in->current_frame->num_repeats < vo->opts->repeat)
         more_frames = true;
 
     pthread_cond_broadcast(&in->wakeup); // for vo_wait_frame()
